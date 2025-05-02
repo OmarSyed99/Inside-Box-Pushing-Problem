@@ -1,131 +1,132 @@
 import os
 import re
-import logging
-from collections import deque
-from typing import Tuple
-
 import numpy as np
 import torch
-
+import logging
 from environment.env import InsideBoxPushingEnv
 
-# ---------- logger ----------
-logger = logging.getLogger("inside_box")
+# --- Logger setup ---
+logger = logging.getLogger('inside_box')
 logger.setLevel(logging.INFO)
 
-LOG_FILE = "training.log"
-fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+LOG_FILE = 'training.log'
 
-# file + console handlers
-for h in (logging.FileHandler(LOG_FILE), logging.StreamHandler()):
-    h.setFormatter(fmt)
-    h.setLevel(logging.INFO)
-    logger.addHandler(h)
+# File handler
+fh = logging.FileHandler(LOG_FILE)
+fh.setLevel(logging.INFO)
 
-# determine run‑id
+# Console handler
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+
+# Formatter
+fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+fh.setFormatter(fmt)
+ch.setFormatter(fmt)
+
+logger.addHandler(fh)
+logger.addHandler(ch)
+# --------------------
+
+# Determine run number by scanning existing log
 run_id = 1
 if os.path.exists(LOG_FILE):
-    with open(LOG_FILE) as f:
-        ids = re.findall(r"=== Run (\d+) ===", f.read())
-        if ids:
-            run_id = max(map(int, ids)) + 1
+    with open(LOG_FILE, 'r') as f:
+        data = f.read()
+    matches = re.findall(r"=== Run (\d+) ===", data)
+    if matches:
+        run_id = max(int(m) for m in matches) + 1
 
-logger.info("\n=== Run %d ===\n", run_id)
+# Log a header for this run
+logger.info('')
+logger.info(f"=== Run {run_id} ===")
+logger.info('')
 
+def run_episode(model, env, render: bool = False, *, epsilon: float = 0.05):
+    """Run **one** episode.
 
-# ---------- helpers ----------
-def run_episode(
-    model,
-    env: InsideBoxPushingEnv,
-    epsilon: float = 0.05,
-    render: bool = False,
-) -> Tuple[float, int, int]:
-    """
-    Executes one episode (no learning inside) and returns:
-        total_reward, success_flag (0/1), elimination_flag (0/1)
+    Parameters
+    ----------
+    model : QMIXAgent | RandomAgent | any policy with ``select_action``
+    env   : InsideBoxPushingEnv instance (already created)
+    render: bool, default False
+        Whether to call ``env.render()`` every step.
+    epsilon: float, default **0.05**
+        Exploration rate passed straight to ``model.select_action``.  Use
+        ``epsilon=0`` for fully‑greedy evaluation.
+
+    Returns
+    -------
+    total_reward : float
+    success      : int  (1 if reward > 0 else 0)
+    elimination   : int  (1 if faulty agent removed else 0)
     """
     obs = env.reset()
     done = False
-    tot_r = 0.0
+    total_reward = 0.0
 
     while not done:
-        # model API wrapper
-        if hasattr(model, "select_action"):
-            actions = model.select_action(obs, epsilon=epsilon)
-        else:  # RandomAgent
-            actions = model.get_actions(obs)
-
-        obs, r, done, _ = env.step(actions)
-        tot_r += r
+        # ←—— use the supplied epsilon (training ≈ 0.05, evaluation = 0.0)
+        actions = model.select_action(obs, epsilon=epsilon)
+        next_obs, reward, done, _ = env.step(actions)
+        obs = next_obs
+        total_reward += reward
         if render:
             env.render()
 
-    success = 1 if tot_r > 0 else 0
-    eliminated = int(env.agents_alive[env.faulty_agent] == 0)
-    return tot_r, success, eliminated
-
+    # success if box ever reached the goal (positive bonus)
+    success = 1 if total_reward > 0 else 0
+    elimination = int(env.agents_alive[env.faulty_agent] == 0)
+    return total_reward, success, elimination
 
 def train_qmix(model, num_episodes: int, env_params: dict | None = None):
-    """
-    Trains QMIXAgent for `num_episodes` and logs 10‑episode rolling stats.
-    Implements a simple ε‑greedy schedule: linearly decays from 1.0 ➜ 0.05.
+    """Train a *QMIXAgent* for ``num_episodes``.
+
+    The function logs reward, success and elimination statistics every 10
+    episodes and prints a final summary at the end.
     """
     env = InsideBoxPushingEnv(**env_params) if env_params else InsideBoxPushingEnv()
 
-    eps_start, eps_end = 1.0, 0.05
-    eps_decay = (eps_start - eps_end) / num_episodes
-
-    rewards, successes, eliminations = [], [], []
+    rewards = []
+    successes = []
+    eliminations = []
 
     for ep in range(1, num_episodes + 1):
-        epsilon = max(eps_end, eps_start - eps_decay * (ep - 1))
+        # standard training exploration (epsilon left at default 0.05)
+        r, s, e = run_episode(model, env, render=False)
 
-        r, s, e = run_episode(model, env, epsilon=epsilon, render=False)
-        # one learning step
-        if hasattr(model, "train_step"):
+        # one optimisation step per episode
+        if hasattr(model, 'train_step'):
             _ = model.train_step()
 
         rewards.append(r)
         successes.append(s)
         eliminations.append(e)
 
-        # every 10 episodes, log stats
         if ep % 10 == 0:
             avg_r = np.mean(rewards[-10:])
             sr = np.mean(successes[-10:]) * 100
             er = np.mean(eliminations[-10:]) * 100
-            logger.info(
-                "Training Episode %d/%d complete.", ep, num_episodes
-            )
-            logger.info(
-                "Avg Reward: %.2f | Success Rate: %.1f%% | Elimination Rate: %.1f%%",
-                avg_r,
-                sr,
-                er,
-            )
+            logger.info(f"Training Episode {ep}/{num_episodes} complete.")
+            logger.info(f"Avg Reward: {avg_r:.2f} | Success Rate: {sr:.1f}% | Elimination Rate: {er:.1f}%")
 
     # final summary
+    final_avg_r = np.mean(rewards)
+    final_sr = np.mean(successes) * 100
+    final_er = np.mean(eliminations) * 100
     logger.info("Training complete. Final Metrics:")
-    logger.info(
-        "Avg Reward: %.2f | Success Rate: %.1f%% | Elimination Rate: %.1f%%",
-        np.mean(rewards),
-        np.mean(successes) * 100,
-        np.mean(eliminations) * 100,
-    )
+    logger.info(f"Avg Reward: {final_avg_r:.2f} | Success Rate: {final_sr:.1f}% | Elimination Rate: {final_er:.1f}%")
     env.close()
 
-
-def evaluate_model(model, env_params: dict | None = None, render: bool = True):
-    """
-    Runs one rendered episode with near‑greedy policy (ε = 0.05).
-    """
+def evaluate_model(model, env_params: dict | None = None, *, render: bool = True):
+    """Evaluate *model* for **one** episode with deterministic (greedy) policy."""
     env = InsideBoxPushingEnv(**env_params) if env_params else InsideBoxPushingEnv()
+
     logger.info("Evaluating model with interactive rendering…")
-    r, s, e = run_episode(model, env, epsilon=0.05, render=render)
-    logger.info(
-        "Evaluation Reward: %.2f | %s | %s",
-        r,
-        "Passed" if s else "Failed",
-        "Eliminated faulty agent" if e else "Did not eliminate faulty agent",
-    )
+    # fully‑greedy: epsilon = 0 disables any exploratory random actions
+    r, s, e = run_episode(model, env, render=render, epsilon=0.0)
+
+    status = "Passed" if s else "Failed"
+    elim = "Eliminated faulty agent" if e else "Did not eliminate faulty agent"
+    logger.info(f"Evaluation Reward: {r:.2f} | {status} | {elim}")
     env.close()

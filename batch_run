@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# ============================================================
+#  batch_run  –  run `python run.py` multiple times in a row
+#
+#  Basic idea:
+#       ./batch_run -n 5 -- --model qmix --episodes 200 --curriculum
+#
+#  Everything *after* the first “--” is passed straight to run.py.
+#  If any of those arguments contains “%d”, the current run number
+#  (1‑based) will be substituted before the call.
+# ------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+NUM_RUNS=1        # default
+RUN_FLAGS=()      # what we pass to run.py
+
+usage() {
+cat <<EOF
+Usage:
+  $SCRIPT_NAME [-n NUM] [--num-runs NUM] [--] [RUN.PY FLAGS]
+
+Options:
+  -n, --num-runs NUM   Number of times to execute run.py (default: 1)
+  -h, --help           Show this message and exit
+
+Examples:
+  # run three times with the same flags
+  $SCRIPT_NAME -n 3 -- --model qmix --episodes 200 --curriculum
+
+  # run once (default) with custom flags
+  $SCRIPT_NAME -- --model qmix --episodes 300 --curriculum
+
+  # run five times and save separate result files
+  $SCRIPT_NAME -n 5 -- \\
+      --model qmix --episodes 200 --curriculum \\
+      --save-path results/run_%d.json
+EOF
+}
+
+# ---------- parse script options (up to the first “--”) ----------
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -n|--num-runs)
+      [[ $# -lt 2 ]] && { echo "❌  Missing value after $1"; usage; exit 1; }
+      NUM_RUNS=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)           # everything after this goes to run.py
+      shift
+      RUN_FLAGS=("$@")
+      break
+      ;;
+    *)
+      echo "❌  Unknown option: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+# ---------- sanity checks ----------
+if ! [[ $NUM_RUNS =~ ^[0-9]+$ ]] || (( NUM_RUNS < 1 )); then
+  echo "❌  --num-runs must be a positive integer (got: $NUM_RUNS)"
+  exit 1
+fi
+
+# ---------- main loop ----------
+for (( i = 1; i <= NUM_RUNS; i++ )); do
+  echo
+  echo "============================================================"
+  echo "  Run $i / $NUM_RUNS    ($(date '+%Y-%m-%d %H:%M:%S'))"
+  echo "------------------------------------------------------------"
+
+  # Replace %d in any argument with the run number
+  EXPANDED_FLAGS=()
+  for arg in "${RUN_FLAGS[@]}"; do
+    EXPANDED_FLAGS+=( "${arg//%d/$i}" )
+  done
+
+  # Execute run.py
+  python run.py "${EXPANDED_FLAGS[@]}"
+  EXIT_CODE=$?
+
+  if [[ $EXIT_CODE -ne 0 ]]; then
+    echo "❌  run.py exited with status $EXIT_CODE — aborting further runs"
+    exit $EXIT_CODE
+  fi
+done
+
+echo
+echo "✅  All $NUM_RUNS run(s) completed successfully."

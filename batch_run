@@ -1,20 +1,8 @@
-#!/usr/bin/env bash
-# ============================================================
-#  batch_run  –  run `python run.py` multiple times in a row
-#
-#  Basic idea:
-#       ./batch_run -n 5 -- --model qmix --episodes 200 --curriculum
-#
-#  Everything *after* the first “--” is passed straight to run.py.
-#  If any of those arguments contains “%d”, the current run number
-#  (1‑based) will be substituted before the call.
-# ------------------------------------------------------------
-
 set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0")
-NUM_RUNS=1        # default
-RUN_FLAGS=()      # what we pass to run.py
+NUM_RUNS=1       
+RUN_FLAGS=()      
 
 usage() {
 cat <<EOF
@@ -39,11 +27,10 @@ Examples:
 EOF
 }
 
-# ---------- parse script options (up to the first “--”) ----------
 while [[ $# -gt 0 ]]; do
   case $1 in
     -n|--num-runs)
-      [[ $# -lt 2 ]] && { echo "❌  Missing value after $1"; usage; exit 1; }
+      [[ $# -lt 2 ]] && { echo "Missing value after $1"; usage; exit 1; }
       NUM_RUNS=$2
       shift 2
       ;;
@@ -51,47 +38,47 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
-    --)           # everything after this goes to run.py
+    --)          
       shift
       RUN_FLAGS=("$@")
       break
       ;;
     *)
-      echo "❌  Unknown option: $1"
+      echo "Unknown option: $1"
       usage
       exit 1
       ;;
   esac
 done
 
-# ---------- sanity checks ----------
+
 if ! [[ $NUM_RUNS =~ ^[0-9]+$ ]] || (( NUM_RUNS < 1 )); then
-  echo "❌  --num-runs must be a positive integer (got: $NUM_RUNS)"
+  echo "--num-runs must be a positive integer (got: $NUM_RUNS)"
   exit 1
 fi
 
-# ---------- main loop ----------
+
 for (( i = 1; i <= NUM_RUNS; i++ )); do
   echo
   echo "============================================================"
   echo "  Run $i / $NUM_RUNS    ($(date '+%Y-%m-%d %H:%M:%S'))"
   echo "------------------------------------------------------------"
 
-  # Replace %d in any argument with the run number
+ 
   EXPANDED_FLAGS=()
   for arg in "${RUN_FLAGS[@]}"; do
     EXPANDED_FLAGS+=( "${arg//%d/$i}" )
   done
 
-  # Execute run.py
+  # Execute the run.py file
   python run.py "${EXPANDED_FLAGS[@]}"
   EXIT_CODE=$?
 
   if [[ $EXIT_CODE -ne 0 ]]; then
-    echo "❌  run.py exited with status $EXIT_CODE — aborting further runs"
+    echo "run.py exited with status $EXIT_CODE — aborting further runs"
     exit $EXIT_CODE
   fi
 done
 
 echo
-echo "✅  All $NUM_RUNS run(s) completed successfully."
+echo "All $NUM_RUNS run(s) completed successfully."

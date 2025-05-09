@@ -1,152 +1,215 @@
-#!/usr/bin/env python3
-import os, re, csv
-from pathlib import Path
-import numpy as np, pandas as pd, matplotlib.pyplot as plt
-from scipy.stats import linregress
+import os, re, statistics
+from collections import deque
 
-LOG_PATH  = Path("training.log")
-RES_DIR   = Path("results")
-CSV_RUNS  = RES_DIR / "run_results.csv"
-CSV_RATES = RES_DIR / "run_rates.csv"
-PNG_BAR   = RES_DIR / "pass_fail_bar.png"
-PNG_RATE  = RES_DIR / "rate_over_runs.png"
-PNG_REW   = RES_DIR / "avg_reward_over_runs.png"
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-RES_DIR.mkdir(exist_ok=True)
+LOG_PATH        = "training.log"
+RES_DIR         = "results"
+RUN_RESULTS_CSV = os.path.join(RES_DIR, "run_results.csv")
+RUN_RATES_CSV   = os.path.join(RES_DIR, "run_rates.csv")
 
-RE_NEW_RUN   = re.compile(r"=== Run (\d+) ===")
-RE_SUCC_ELIM = re.compile(r"Success Rate:\s*([\d\.]+)%\s*\|\s*Elimination Rate:\s*([\d\.]+)%")
-RE_EVAL_LINE = re.compile(
-    r"Evaluation Reward:\s*([-+]?\d+(?:\.\d+)?)\s*\|\s*(Passed|Failed)\s*\|\s*(Eliminated faulty agent|Did not eliminate faulty agent)"
-)
+os.makedirs(RES_DIR, exist_ok=True)
 
-def parse_data(log_path: Path = LOG_PATH):
-    run_results, run_rates = [], []
-    cur_run_id = None
-    successes, eliminations = [], []
-    eval_reward = passed_flag = elim_flag = None
-    def flush_run():
-        nonlocal cur_run_id, successes, eliminations, eval_reward, passed_flag, elim_flag
-        if cur_run_id is None or eval_reward is None:
-            return
-        avg_success = np.mean(successes) if successes else 0.0
-        avg_elim    = np.mean(eliminations) if eliminations else 0.0
-        run_results.append(dict(
-            Run=cur_run_id,
-            Reward=eval_reward,
-            successfulCompletion=int(passed_flag),
-            successfulElimination=int(elim_flag)
-        ))
-        run_rates.append(dict(
-            Run=cur_run_id,
-            AvgSuccessRate=round(avg_success, 3),
-            AvgEliminationRate=round(avg_elim, 3)
-        ))
-        cur_run_id = None
-        successes, eliminations = [], []
-        eval_reward = passed_flag = elim_flag = None
-    with log_path.open("rb") as fb:
-        for raw in fb:
-            try:
-                line = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                line = raw.decode("latin1", "ignore")
-            m_run = RE_NEW_RUN.search(line)
-            if m_run:
-                flush_run()
-                cur_run_id = int(m_run.group(1))
-                continue
-            m_rate = RE_SUCC_ELIM.search(line)
-            if m_rate:
-                successes.append(float(m_rate.group(1)))
-                eliminations.append(float(m_rate.group(2)))
-                continue
-            m_eval = RE_EVAL_LINE.search(line)
+def parse_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+    runs, stats = [], []
+    run_id = 0
+
+    with open(LOG_PATH, "rb") as f:
+        for raw in f:
+            line = raw.decode("latin1", errors="ignore")
+
+            m_eval = re.search(
+                r"Evaluation Reward:\s*([-\d.]+)\s*\|\s*(Passed|Failed)\s*\|\s*"
+                r"(Eliminated|Did not eliminate)", line)
             if m_eval:
-                eval_reward = float(m_eval.group(1))
-                passed_flag = m_eval.group(2) == "Passed"
-                elim_flag   = m_eval.group(3).startswith("Eliminated")
-    flush_run()
-    df_runs  = pd.DataFrame(run_results).sort_values("Run").reset_index(drop=True)
-    df_rates = pd.DataFrame(run_rates).sort_values("Run").reset_index(drop=True)
-    df_runs.to_csv(CSV_RUNS,  index=False)
-    df_rates.to_csv(CSV_RATES, index=False)
-    print(f"Parsed {len(df_runs)} runs → {CSV_RUNS.name}, {CSV_RATES.name}")
-    return df_runs, df_rates
+                run_id += 1
+                reward = float(m_eval.group(1))
+                passed = m_eval.group(2) == "Passed"
+                elim   = m_eval.group(3).startswith("Eliminated")
+                runs.append([run_id, reward, passed, elim])
 
-def graph_bar_chart(df_runs: pd.DataFrame, out_path: Path = PNG_BAR):
-    total_runs = len(df_runs)
-    pass_cnt   = df_runs["successfulCompletion"].sum()
-    fail_cnt   = total_runs - pass_cnt
-    elim_pass  = df_runs["successfulElimination"].sum()
-    elim_fail  = total_runs - elim_pass
-    labels   = ["Run Failed", "Run Passed", "Elim Failed", "Elim Passed"]
-    counts   = [fail_cnt, pass_cnt, elim_fail, elim_pass]
-    colors   = ["#377eb8", "#ff7f0e", "#377eb8", "#ff7f0e"]
-    x_pos    = [0, 1, 3, 4]
-    fig, ax = plt.subplots(figsize=(8, 6))
-    bars = ax.bar(x_pos, counts, color=colors, width=0.8)
-    ax.set_xticks(x_pos, labels)
-    ax.set_ylabel("Count")
-    ax.set_ylim(0, max(counts) * 1.15)
-    ax.set_title("Overall Outcome Counts")
-    for bar, cnt in zip(bars, counts):
-        ax.text(bar.get_x() + bar.get_width() / 2, cnt + 0.5, f"{cnt}", ha="center", va="bottom", fontsize=9)
-    ax.text(0.99, 1.04, f"Total runs: {total_runs}", transform=ax.transAxes, ha="right", va="center", fontsize=10, fontweight="bold")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Bar chart  → {out_path}")
+            m_avg = re.search(
+                r"Avg Reward:\s*([-\d.]+)\s*\|\s*Success Rate:\s*([\d.]+)%\s*\|\s*"
+                r"Elimination Rate:\s*([\d.]+)%", line)
+            if m_avg:
+                stats.append([run_id,
+                              float(m_avg.group(1)),
+                              float(m_avg.group(2)),
+                              float(m_avg.group(3))])
 
-def _scatter_line(ax, x, y, ylabel, color):
-    ax.scatter(x, y, color=color, alpha=0.8)
-    slope, intercept, *_ = linregress(x, y)
-    ax.plot(x, slope * x + intercept, color=color, linewidth=2, linestyle="--")
-    for xi in x:
-        ax.axvline(xi, color="gray", linestyle=":", alpha=0.15, linewidth=0.8)
-    ax.set_ylabel(ylabel)
-    avg_val = y.mean()
-    ax.text(0.02, 0.9, f"Average = {avg_val:.1f}%", transform=ax.transAxes, ha="left", va="center", fontsize=9, bbox=dict(facecolor="white", edgecolor="black", boxstyle="round,pad=0.3"))
+    df_runs  = pd.DataFrame(runs,  columns=["Run", "Reward", "Success", "Elimination"])
+    df_stats = (pd.DataFrame(stats,
+                             columns=["Run", "AvgReward", "SuccessRate", "ElimRate"])
+                .groupby("Run").mean().reset_index())
 
-def graph_rate_run(df_rates: pd.DataFrame, out_path: Path = PNG_RATE):
-    x = df_rates["Run"].values
-    succ = df_rates["AvgSuccessRate"].values
-    elim = df_rates["AvgEliminationRate"].values
-    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(10, 8), gridspec_kw={"hspace": 0.3})
-    _scatter_line(ax1, x, succ, "Success Rate (%)", "#2b8cbe")
-    _scatter_line(ax2, x, elim, "Elimination Rate (%)", "#e6550d")
+    df_runs.to_csv(RUN_RESULTS_CSV, index=False)
+    df_stats.to_csv(RUN_RATES_CSV,  index=False)
+    print(f"Parsed {len(df_runs)} runs → {RUN_RESULTS_CSV}, {RUN_RATES_CSV}")
+    return df_runs, df_stats
+
+
+def graph_bar_chart(df_runs: pd.DataFrame):
+    counts = [
+        len(df_runs[~df_runs.Success]),
+        len(df_runs[df_runs.Success]),
+        len(df_runs[~df_runs.Elimination]),
+        len(df_runs[df_runs.Elimination]),
+    ]
+    labels  = ["Run\nFailed", "Run\nPassed", "Elim\nFailed", "Elim\nPassed"]
+    colors  = ["#1f77b4", "#ff7f0e"] * 2
+    xpos    = np.arange(4)
+
+    plt.figure(figsize=(6, 5))
+    plt.bar(xpos, counts, color=colors, width=0.6)
+    for x, c in zip(xpos, counts):
+        plt.text(x, c + 0.5, str(c), ha="center", va="bottom", fontsize=9)
+
+    total = len(df_runs)
+    plt.text(3.95, max(counts) + 2, f"Total runs: {total}",
+             ha="right", va="bottom", fontsize=9)
+    plt.xticks(xpos, labels)
+    plt.ylabel("Count")
+    plt.title("Run & Elimination Outcomes")
+    plt.tight_layout()
+
+    out = os.path.join(RES_DIR, "pass_fail_bar.png")
+    plt.savefig(out, dpi=300)
+    plt.close()
+    print(f"Bar chart {out}")
+
+
+def graph_rate_run(df_stats: pd.DataFrame):
+    """Per-run scatter plot (success & elimination) + best-fit lines."""
+    df_stats = df_stats.sort_values("Run")
+    x = df_stats.Run.values
+    succ = df_stats.SuccessRate.values
+    elim = df_stats.ElimRate.values
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+
+    ax1.scatter(x, succ, s=12, color="#ff7f0e", alpha=0.7)
+    m1, b1 = np.polyfit(x, succ, 1)
+    ax1.plot(x, m1 * x + b1, "--", linewidth=1.4, color="#ff7f0e")
+    ax1.set_ylabel("Success Rate (%)")
+    ax1.text(0.02, 0.9, f"Mean = {succ.mean():.1f}%",
+             transform=ax1.transAxes, fontsize=8,
+             bbox=dict(facecolor="white", edgecolor="black", pad=0.2))
+
+   
+    ax2.scatter(x, elim, s=12, color="#1f77b4", alpha=0.7)
+    m2, b2 = np.polyfit(x, elim, 1)
+    ax2.plot(x, m2 * x + b2, "--", linewidth=1.4, color="#1f77b4")
+    ax2.set_ylabel("Elim Rate (%)")
     ax2.set_xlabel("Run")
-    ax1.set_ylim(0, 100)
-    ax2.set_ylim(0, 100)
-    fig.suptitle("Rates over Runs")
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Rate plots → {out_path}")
+    ax2.text(0.02, 0.9, f"Mean = {elim.mean():.1f}%",
+             transform=ax2.transAxes, fontsize=8,
+             bbox=dict(facecolor="white", edgecolor="black", pad=0.2))
 
-def graph_reward_run(df_runs: pd.DataFrame, out_path: Path = PNG_REW):
-    x = df_runs["Run"].values
-    y = df_runs["Reward"].values
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.scatter(x, y, color="#4daf4a", alpha=0.8)
-    slope, intercept, *_ = linregress(x, y)
-    ax.plot(x, slope * x + intercept, color="#4daf4a", linewidth=2, linestyle="--")
-    for xi in x:
-        ax.axvline(xi, color="gray", linestyle=":", alpha=0.15, linewidth=0.8)
+    fig.suptitle("Rates over Runs")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+    out = os.path.join(RES_DIR, "rate_over_runs.png")
+    plt.savefig(out, dpi=300)
+    plt.close()
+    print(f"Rate-over-runs plot {out}")
+
+
+def graph_rate_sliding(df_stats: pd.DataFrame, win: int = 50):
+    df_stats = df_stats.sort_values("Run")
+    runs = df_stats.Run.values
+    sr   = df_stats.SuccessRate.values
+    er   = df_stats.ElimRate.values
+
+    def smooth(arr):
+        means, vars_ = [], []
+        dq = deque(maxlen=win)
+        for x in arr:
+            dq.append(x)
+            means.append(statistics.mean(dq))
+            vars_.append(statistics.pvariance(dq) if len(dq) > 1 else 0)
+        return np.array(means), np.array(vars_)
+
+    m_sr, v_sr = smooth(sr)
+    m_er, v_er = smooth(er)
+
+    fig, ax = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+    ax[0].plot(runs, m_sr, color="#ff7f0e", label="Mean Success %")
+    ax[0].fill_between(runs, m_sr - np.sqrt(v_sr), m_sr + np.sqrt(v_sr),
+                       alpha=0.2, color="#ff7f0e")
+    ax[0].set_ylabel("Success %")
+    ax[0].legend()
+
+    ax[1].plot(runs, m_er, color="#1f77b4", label="Mean Elimination %")
+    ax[1].fill_between(runs, m_er - np.sqrt(v_er), m_er + np.sqrt(v_er),
+                       alpha=0.2, color="#1f77b4")
+    ax[1].set_ylabel("Elimination %")
+    ax[1].set_xlabel("Run")
+    ax[1].legend()
+
+    fig.suptitle(f"Sliding-window (w={win}) Mean ± SD", y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    out = os.path.join(RES_DIR, "sliding_window_rates.png")
+    plt.savefig(out, dpi=300)
+    plt.close()
+    print(f"Sliding-window plot {out}")
+
+
+def graph_confusion(df_runs: pd.DataFrame):
+    tp = len(df_runs[df_runs.Success & df_runs.Elimination])
+    fp = len(df_runs[df_runs.Success & ~df_runs.Elimination])
+    fn = len(df_runs[~df_runs.Success & df_runs.Elimination])
+    tn = len(df_runs[~df_runs.Success & ~df_runs.Elimination])
+    cm = np.array([[tp, fp], [fn, tn]])
+
+    plt.figure(figsize=(4, 3.5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False,
+                xticklabels=["Elim Yes", "Elim No"],
+                yticklabels=["Success Yes", "Success No"])
+    plt.title("Confusion Matrix of Outcomes")
+    plt.tight_layout()
+
+    out = os.path.join(RES_DIR, "confusion_matrix.png")
+    plt.savefig(out, dpi=300)
+    plt.close()
+    print(f"Confusion matrix{out}")
+
+
+def graph_reward_run(df_runs: pd.DataFrame):
+    x = df_runs.Run.values
+    y = df_runs.Reward.values
+
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.scatter(x, y, s=15, color="#4daf4a", alpha=0.8)
+
+    m, b = np.polyfit(x, y, 1)
+    ax.plot(x, m * x + b, "--", linewidth=1.8, color="#4daf4a")
+
+    ax.set_title("Average Reward over Runs")
     ax.set_xlabel("Run")
     ax.set_ylabel("Evaluation Reward")
-    ax.set_title("Average Reward over Runs")
-    avg_val = y.mean()
-    ax.text(0.02, 0.9, f"Average = {avg_val:.2f}", transform=ax.transAxes, ha="left", va="center", fontsize=9, bbox=dict(facecolor="white", edgecolor="black", boxstyle="round,pad=0.3"))
+    ax.text(0.02, 0.9, f"Mean = {y.mean():.2f}",
+            transform=ax.transAxes, fontsize=8,
+            bbox=dict(facecolor="white", edgecolor="black", pad=0.2))
+
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Reward plot → {out_path}")
+
+    out = os.path.join(RES_DIR, "avg_reward_over_runs.png")
+    plt.savefig(out, dpi=300)
+    plt.close()
+    print(f"Reward plot{out}")
 
 def main():
-    df_runs, df_rates = parse_data()
+    df_runs, df_stats = parse_data()
     graph_bar_chart(df_runs)
-    graph_rate_run(df_rates)
+    graph_rate_run(df_stats)       
+    graph_rate_sliding(df_stats)   
+    graph_confusion(df_runs)
     graph_reward_run(df_runs)
+
 
 if __name__ == "__main__":
     main()

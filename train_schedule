@@ -1,0 +1,32 @@
+
+set -euo pipefail
+
+stage_runs=(
+  "99  100 no-eval"   
+  "1   1   eval"     
+  "99  50  no-eval"   
+  "1   1   eval"      
+  "99  25  no-eval"   
+  "1   1   eval"      
+  "99  10  no-eval"   
+  "1   1   eval"      
+  "599 5  no-eval"    
+  "1   1   eval"      
+)
+
+seed=1   
+
+for spec in "${stage_runs[@]}"; do
+  set -- $spec          
+  count=$1 episodes=$2 mode=$3
+
+  for ((i = 0; i < count; i++)); do
+    flags="--model qmix --episodes ${episodes} --seed ${seed} --checkpoint-dir checkpoints"
+    [[ $mode == "no-eval" ]] && flags="${flags} --no-eval"
+
+    
+    ./batch_run -n 1 -- ${flags}
+
+    ((seed++))          
+  done
+done

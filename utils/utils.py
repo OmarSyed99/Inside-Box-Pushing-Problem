@@ -54,10 +54,12 @@ def run_episode(agent, env, train=False, render=False):
             action=agent.select_action(obs)
 
         next_obs, reward, done, info = env.step(action)
+        # print(f"Step reward: {reward}")
      
         # Professor Zinovi’s request #1:
         # Every transition is now funnelled into the replay buffer via the agent’s store_transition hook.
-        if train and hasattr(agent, "store_transition"):
+        # if train and hasattr(agent, "store_transition"):
+        if train:
             agent.store_transition(obs, action, reward, next_obs, done)
 
         # Appending the data to the buffer
@@ -81,15 +83,15 @@ def run_episode(agent, env, train=False, render=False):
 def train_qmix(agent, num_episodes, env_params=None, rng_seed=None):
     env = InsideBoxPushingEnv(**env_params) if env_params else InsideBoxPushingEnv()
     # Professor Zinovi’s request #2
-    if rng_seed is not None:  
-        env.reset(seed=rng_seed)        
-        np.random.seed(rng_seed)        
-        random.seed(rng_seed)           
-        torch.manual_seed(rng_seed)     
-        if torch.cuda.is_available():           
-            torch.cuda.manual_seed_all(rng_seed)
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
+    # if rng_seed is not None:  
+    #     env.reset(seed=rng_seed)        
+    #     np.random.seed(rng_seed)        
+    #     random.seed(rng_seed)           
+    #     torch.manual_seed(rng_seed)     
+    #     if torch.cuda.is_available():           
+    #         torch.cuda.manual_seed_all(rng_seed)
+    #         torch.backends.cudnn.deterministic = True
+    #         torch.backends.cudnn.benchmark = False
 
     rewards= []
     successes= []
@@ -98,8 +100,13 @@ def train_qmix(agent, num_episodes, env_params=None, rng_seed=None):
 
     for ep in range(1, num_episodes + 1):
         r, s, e = run_episode(agent, env, train=True, render=False)
-        if hasattr(agent, "train_step"):
-            agent.train_step()
+        # if hasattr(agent, "train_step"):
+        # agent.train_step()
+        # Get loss
+        loss_val = agent.train_step() 
+        # print(f"Loss: {loss_val}")
+        if loss_val is None:
+            loss_val = np.nan
 
         rewards.append(r)
         successes.append(s)
@@ -118,7 +125,7 @@ def train_qmix(agent, num_episodes, env_params=None, rng_seed=None):
         elim_result = "N"
         if e:
             elim_result = "Y"
-        LOGGER.info("Model {} | Run-ID {} | Seed {} | Episode {}/{} | Reward {:>7.2f} | Success {} | Elim {}".format(agent.__class__.__name__, _run_id, rng_seed, ep, num_episodes, r, succ_result, elim_result))
+        LOGGER.info("Model {} | Run-ID {} | Seed {} | Episode {}/{} | Loss {:>.4f} | Reward {:>7.2f} | Success {} | Elim {}".format(agent.__class__.__name__, _run_id, rng_seed, ep, num_episodes, loss_val, r, succ_result, elim_result))
 
     LOGGER.info("Training complete — overall metrics:")
     LOGGER.info("Avg Reward: {:>7.2f} | Success Rate: {:>5.1f}% | Elimination Rate: {:>5.1f}%".format(np.mean(rewards),np.mean(successes) * 100.0,np.mean(eliminations) * 100.0,))
@@ -139,10 +146,10 @@ def evaluate_model(agent, env_params = None, render = True, rng_seed=None):
 
     LOGGER.info("Evaluating trained QMIXAgent…")
     rewards, successes, eliminations = [], [], []
-    for i in range(10):
-        r, s, e = run_episode(agent, env, train=False, render=render)
-        rewards.append(r)
-        successes.append(s)
-        eliminations.append(e)
-    LOGGER.info("Eval 10-ep mean reward {:>.2f} | Success {:>4.1f}% | Elim {:>4.1f}%".format(np.mean(rewards),np.mean(successes) * 100.0,np.mean(eliminations) * 100.0,))
+    # for i in range(10):
+    r, s, e = run_episode(agent, env, train=False, render=render)
+    # rewards.append(r)
+    # successes.append(s)
+    # eliminations.append(e)
+    LOGGER.info("Evaluation mean reward {:>.2f} | Success {} | Elimination {}".format(r,"Y" if s else "N", "Y" if e else "N"))
     env.close()

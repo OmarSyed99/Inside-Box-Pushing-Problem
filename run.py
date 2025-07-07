@@ -86,7 +86,7 @@ if args.model == "random":
     exit(0)
 
 ckpt_dir = Path(args.checkpoint_dir)
-default_tag = f"{args.model}_{'baseline' if args.baseline else 'faulty'}_seed{args.seed}"
+default_tag = f"{args.model}_{'baseline' if args.baseline else 'faulty'}"
 tag = args.tag or default_tag
 ckpt_pattern = f"{tag}_*.pt"
 
@@ -99,6 +99,8 @@ _tmp_env.close()
 agent = QMIXAgent(action_space=_tmp_env.action_space,n_agents=4, state_dim=state_dim)
 if not args.fresh:
     ckpt = latest_ckpt(ckpt_dir, ckpt_pattern)
+    print(ckpt_pattern)
+    print(ckpt)
     if ckpt and not args.fresh:
         print(f"loading checkpoint {ckpt.name}")
         with open(ckpt, "rb") as f:

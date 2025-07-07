@@ -11,7 +11,7 @@ class InsideBoxPushingEnv(gym.Env):
         self,
         grid_size: int = 10,
         num_agents: int = 4,
-        max_steps: int = 100,
+        max_steps: int = 200,
         base_mass: float = 1.0,
         faulty_extra_mass: float = 1.0,
         push_strength: float = 1.0,
@@ -19,6 +19,7 @@ class InsideBoxPushingEnv(gym.Env):
         target_threshold: float = 0.5,
         enable_voting: bool = True,
         enable_obstacle: bool = False,
+        random_faulty: bool = True
     ):
         super().__init__()
         self.grid_size = grid_size
@@ -30,6 +31,7 @@ class InsideBoxPushingEnv(gym.Env):
         self.target_threshold = target_threshold
         self.enable_voting = enable_voting
         self.enable_obstacle = enable_obstacle
+        self.random_faulty = random_faulty
         self.elimination_threshold = (
             elimination_threshold if elimination_threshold is not None else num_agents // 2
         )
@@ -55,7 +57,10 @@ class InsideBoxPushingEnv(gym.Env):
         self.box_pos = np.random.uniform(0, self.grid_size, size=2).astype(np.float32)
         self.target_pos = np.array([self.grid_size - 1, self.grid_size - 1], dtype=np.float32)
         self.agents_alive = np.ones(self.num_agents, dtype=np.float32)
-        self.faulty_agent = 0
+        if self.random_faulty:
+            self.faulty_agent = np.random.randint(self.num_agents)
+        else:
+            self.faulty_agent = 0
         self.faulty_eliminated_this_episode = False
 
         if self.enable_obstacle:
@@ -85,7 +90,7 @@ class InsideBoxPushingEnv(gym.Env):
             ):
                 self.agents_alive[self.faulty_agent] = 0
                 self.faulty_eliminated_this_episode = True
-                reward += 50.0
+                reward += 5.0
 
         net_force = np.zeros(2, dtype=np.float32)
         for i, a in enumerate(actions):
@@ -103,7 +108,7 @@ class InsideBoxPushingEnv(gym.Env):
             if i == self.faulty_agent:
                 force[:] = 0
             net_force += force
-
+        net_force = net_force *0.25
         prev_dist = np.linalg.norm(self.box_pos - self.target_pos)
         eff_mass = self.base_mass + (
             self.faulty_extra_mass
@@ -111,6 +116,7 @@ class InsideBoxPushingEnv(gym.Env):
             else 0
         )
         new_pos = self.box_pos + net_force / eff_mass
+        # print(new_pos)
 
         if self.enable_obstacle and self.obstacle_pos is not None:
             if not np.array_equal(np.round(new_pos).astype(int), self.obstacle_pos):
@@ -123,7 +129,7 @@ class InsideBoxPushingEnv(gym.Env):
 
         done = False
         if new_dist < self.target_threshold:
-            reward += 100.0
+            reward += 10.0
             done = True
             info["success"] = True
         elif self.current_step >= self.max_steps:
@@ -131,7 +137,7 @@ class InsideBoxPushingEnv(gym.Env):
             info["success"] = False
 
         if done and self.agents_alive[self.faulty_agent] == 1:
-            reward -= 25.0
+            reward -= 2.5
 
         return self._get_obs(), reward, done, info
 

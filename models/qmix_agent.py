@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import itertools 
 
 
 # Singleagent Q network
@@ -16,9 +17,10 @@ class AgentNetwork(nn.Module):
         self.q_out = nn.Linear(hidden_dim, n_actions)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return self.q_out(x)
+
+        fc1_out = F.relu(self.fc1(x))
+        fc2_out = F.relu(self.fc2(fc1_out))
+        return self.q_out(fc2_out)
 
 
 # QMIX mixing network
@@ -80,10 +82,10 @@ class QMIXAgent:
         params = list(self.mixing_net.parameters())
         for net in self.agent_nets:
             params.extend(net.parameters())
-        self.optim = torch.optim.RMSprop(params, lr=5e-4)
+        self.optim = torch.optim.RMSprop(params, lr=1e-4)
 
         # Replay
-        self.buffer = deque(maxlen=8000)
+        self.buffer = deque(maxlen=16000)
         self.batch_size = 64
         self.gamma = 0.99
 
@@ -112,45 +114,90 @@ class QMIXAgent:
         self.buffer.append((o, a, r, o2, d))
 
     # Training step function
+    # def train_step(self):
+    #     if len(self.buffer) < self.batch_size:
+    #         return None
+
+    #     batch = random.sample(self.buffer, self.batch_size)
+    #     obs_np = np.stack([b[0] for b in batch]).astype(np.float32)   
+    #     acts_np = np.stack([b[1] for b in batch]).astype(np.int64)   
+    #     r_np = np.array([b[2] for b in batch], dtype=np.float32)      
+    #     obs2_np = np.stack([b[3] for b in batch]).astype(np.float32)  
+    #     done_np = np.array([b[4] for b in batch], dtype=np.float32)   
+    #     obs_b = torch.from_numpy(obs_np).to(self.device)
+    #     obs2_b = torch.from_numpy(obs2_np).to(self.device)
+    #     acts_b = torch.from_numpy(acts_np).to(self.device)
+    #     r_b = torch.from_numpy(r_np).to(self.device)
+    #     done_b = torch.from_numpy(done_np).to(self.device)
+
+    #     # Each agent Qs
+    #     qs, qs_next = [], []
+    #     for i, net in enumerate(self.agent_nets):
+    #         q = net(obs_b).gather(1, acts_b[:, i].unsqueeze(1)).squeeze(1)
+    #         q_next = self.target_agent_nets[i](obs2_b).max(dim=1)[0]
+    #         qs.append(q)
+    #         qs_next.append(q_next)
+    #     q_stack = torch.stack(qs, dim=1)       
+    #     q_next_stack = torch.stack(qs_next, dim=1)
+
+    #     # Mixing log
+    #     q_tot = self.mixing_net(q_stack, obs_b)
+    #     with torch.no_grad():
+    #         target_q_tot = self.target_mixing(q_next_stack, obs2_b)
+    #         y = r_b + (1 - done_b) * self.gamma * target_q_tot
+
+
+    #     # print(f"q_tot: {q_tot}, y: {y}, r_b: {r_b}")
+    #     loss = F.mse_loss(q_tot, y)
+
+    #     self.optim.zero_grad()
+    #     loss.backward()
+    #     self.optim.step()
+
+    #     return loss.item()
+    
+    # Training step function
     def train_step(self):
         if len(self.buffer) < self.batch_size:
             return None
 
         batch = random.sample(self.buffer, self.batch_size)
-        obs_np = np.stack([b[0] for b in batch]).astype(np.float32)   
-        acts_np = np.stack([b[1] for b in batch]).astype(np.int64)   
-        r_np = np.array([b[2] for b in batch], dtype=np.float32)      
-        obs2_np = np.stack([b[3] for b in batch]).astype(np.float32)  
-        done_np = np.array([b[4] for b in batch], dtype=np.float32)   
-        obs_b = torch.from_numpy(obs_np).to(self.device)
-        obs2_b = torch.from_numpy(obs2_np).to(self.device)
-        acts_b = torch.from_numpy(acts_np).to(self.device)
-        r_b = torch.from_numpy(r_np).to(self.device)
-        done_b = torch.from_numpy(done_np).to(self.device)
+        obs = torch.tensor(np.stack([b[0] for b in batch]),dtype=torch.float32, device=self.device)    
+        acts = torch.tensor(np.stack([b[1] for b in batch]),dtype=torch.int64,  device=self.device)      
+        rew = torch.tensor([b[2] for b in batch],dtype=torch.float32, device=self.device)     
+        obs2 = torch.tensor(np.stack([b[3] for b in batch]),dtype=torch.float32, device=self.device)
+        done = torch.tensor([b[4] for b in batch],dtype=torch.float32, device=self.device)     
 
-        # Each agent Qs
+        rew *= 10.0                             
+        eps = 1e-5
+        state = (obs - obs.mean(dim=0, keepdim=True)) / (obs .std(dim=0, keepdim=True) + eps)
+        state2 = (obs2 - obs2.mean(dim=0, keepdim=True)) / (obs2.std(dim=0, keepdim=True) + eps)
+
         qs, qs_next = [], []
         for i, net in enumerate(self.agent_nets):
-            q = net(obs_b).gather(1, acts_b[:, i].unsqueeze(1)).squeeze(1)
-            q_next = self.target_agent_nets[i](obs2_b).max(dim=1)[0]
-            qs.append(q)
-            qs_next.append(q_next)
-        q_stack = torch.stack(qs, dim=1)       
-        q_next_stack = torch.stack(qs_next, dim=1)
+            q_all = net(obs)                       
+            act_i = acts[:, i].unsqueeze(1)        
+            qs.append(q_all.gather(1, act_i).squeeze(1)) 
 
-        # Mixing log
-        q_tot = self.mixing_net(q_stack, obs_b)
+            with torch.no_grad():
+                greedy_next = q_all.argmax(1, keepdim=True)
+                tgt_all = self.target_agent_nets[i](obs2)
+                qs_next.append(tgt_all.gather(1, greedy_next).squeeze(1))
+
+        q_tot = self.mixing_net(torch.stack(qs,1), state)
         with torch.no_grad():
-            target_q_tot = self.target_mixing(q_next_stack, obs2_b)
-            y = r_b + (1 - done_b) * self.gamma * target_q_tot
+            tgt_tot = self.target_mixing(torch.stack(qs_next, 1), state2)
+            y = rew + (1 - done) * self.gamma * tgt_tot          
 
         loss = F.mse_loss(q_tot, y)
-
-        self.optim.zero_grad()
+        self.optim.zero_grad(set_to_none=True)
         loss.backward()
-        self.optim.step()
 
+        # clip all parameters of agent nets + mixer to a max-norm of 10
+        torch.nn.utils.clip_grad_norm_(itertools.chain(*(net.parameters() for net in self.agent_nets),self.mixing_net.parameters()),10.0)
+        self.optim.step()
         return loss.item()
+    
 
     # To keep persistence (Look at logic)
     def save(self, path: str):
